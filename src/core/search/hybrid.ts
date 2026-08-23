@@ -23,7 +23,7 @@ import { embed, embedQuery } from '../embedding.ts';
 import { registerBackgroundWorkDrainer } from '../background-work.ts';
 import { isDbAccessFailure } from '../pg-access-classify.ts';
 import { resolveEmbeddingColumn, isCacheSafe } from './embedding-column.ts';
-import { resolveHardExcludes } from './source-boost.ts';
+import { resolveHardExcludes, resolveBoostMap } from './source-boost.ts';
 import {
   resolveAdaptiveReturn,
   applyAdaptiveReturn,
@@ -2401,6 +2401,12 @@ export async function hybridSearchCached(
     // rows that can never be served to (or written by) a trusted
     // private-included call.
     excludePrivate: opts?.excludePrivate === true,
+    // fix/source-boost-cache-key -- fold the resolved source-boost map
+    // (defaults merged with GBRAIN_SOURCE_BOOST) into the cache key so a
+    // row written under one boost policy can never be served to a lookup
+    // under another. Without this, GBRAIN_SOURCE_BOOST was inert whenever
+    // the semantic cache had a fresh row for a similar query.
+    sourceBoosts: resolveBoostMap(),
   });
 
   // Cache decision: opts.useCache (explicit) wins over global config; global

@@ -19,7 +19,7 @@ import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { SemanticQueryCache, cacheRowId } from '../src/core/search/query-cache.ts';
 import type { SearchResult } from '../src/core/types.ts';
 import { knobsHash, resolveSearchMode } from '../src/core/search/mode.ts';
-import { resolveHardExcludes } from '../src/core/search/source-boost.ts';
+import { resolveHardExcludes, resolveBoostMap } from '../src/core/search/source-boost.ts';
 import { resetFtsLanguageCache } from '../src/core/fts-language.ts';
 import { configureGateway, resetGateway } from '../src/core/ai/gateway.ts';
 
@@ -438,5 +438,37 @@ describe('excludePrivate cache isolation (#4352 follow-up)', () => {
 
     expect((await cache.lookup(emb, { knobsHash: trustedHash })).hit).toBe(false);
     expect((await cache.lookup(emb, { knobsHash: excludingHash })).hit).toBe(true);
+  });
+});
+
+describe('source-boost cache isolation', () => {
+  // Same contamination class as hard-excludes above. The boost factor
+  // multiplies into every SQL arm score at query-BUILD time, i.e. only on a
+  // cache miss -- so before this fold, a row cached under one
+  // GBRAIN_SOURCE_BOOST policy was served to lookups under a different one,
+  // and the env var appeared completely inert for up to cache.ttl_seconds and
+  // across processes. Found in production: a 100x demote (`concepts/:0.01`)
+  // produced byte-identical scores AND identical ordering.
+  const hashFor = (env: string | undefined) =>
+    knobsHash(resolveSearchMode({ mode: 'balanced' }), {
+      sourceBoosts: resolveBoostMap(env),
+    });
+
+  test('a different boost map yields a different knobs hash', () => {
+    expect(hashFor('memory/:3.0')).not.toBe(hashFor(undefined));
+    expect(hashFor('memory/:3.0')).not.toBe(hashFor('memory/:1.6'));
+    expect(hashFor('memory/:3.0,threads/:0.6')).not.toBe(hashFor('memory/:3.0'));
+  });
+
+  test('the same boost map yields a stable hash, whatever the key order', () => {
+    expect(hashFor('memory/:3.0')).toBe(hashFor('memory/:3.0'));
+    // serialization sorts entries, so declaration order must not matter
+    expect(hashFor('memory/:3.0,threads/:0.6')).toBe(hashFor('threads/:0.6,memory/:3.0'));
+  });
+
+  test('a malformed entry is skipped, and hashes as though absent', () => {
+    // parseSourceBoostEnv drops unparseable pairs silently; the hash must
+    // reflect the EFFECTIVE map, not the raw string.
+    expect(hashFor('not-a-pair')).toBe(hashFor(undefined));
   });
 });

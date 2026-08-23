@@ -949,7 +949,14 @@ export function attributeKnob<K extends keyof ModeBundle>(
 // within cache.ttl_seconds (3600s default). (Authored as 23→24 on the
 // wave-g branch; 24 and 25 were claimed by the two bumps above while it
 // was in flight, so it takes the next free number per the D8 convention.)
-export const KNOBS_HASH_VERSION = 26;
+// bump 26→27 (fork sternryan/gbrain, fix/source-boost-cache-key): `sb=` — the
+// RESOLVED source-boost map (GBRAIN_SOURCE_BOOST / search.source_boost). The
+// factor multiplies into every SQL arm score at query-build time (cache MISS
+// only), so a row cached under one boost policy was served to lookups under
+// another, which made the knob look inert for up to cache.ttl_seconds and
+// across processes. Same contamination class as hx=. Sorted entries,
+// 4-decimal factors, "none" when unset. Same one-time cold-miss pattern.
+export const KNOBS_HASH_VERSION = 27;
 
 /**
  * v0.36 (D8 / CDX-2) — second-arg context for the cache key. The
@@ -1031,6 +1038,16 @@ export interface KnobsHashContext {
    * brain's rows under another brain's patterns in a multi-engine process.
    */
   intentPatterns?: string;
+  /**
+   * v=27 (fork, fix/source-boost-cache-key): the RESOLVED source-boost map. The
+   * factor multiplies into every SQL arm score, so a cache row written under
+   * one boost map must never be served to a lookup under another. Before this,
+   * GBRAIN_SOURCE_BOOST changes were INERT for up to cache.ttl_seconds (and
+   * across processes) because the semantic cache served rows keyed without the
+   * boost policy. Sorted serialization so map insertion order is irrelevant;
+   * undefined falls back to the literal none for legacy callers.
+   */
+  sourceBoosts?: Record<string, number>;
 }
 
 export function knobsHash(
@@ -1173,6 +1190,9 @@ export function knobsHash(
     `sal=${ctx?.salience ?? 'off'}`,
     `rec=${ctx?.recency ?? 'off'}`,
     `ipat=${ctx?.intentPatterns ?? 'none'}`,
+    // v=27 addition (fork, append-only): resolved source-boost map — see the
+    // bump 26→27 note above.
+    `sb=${ctx?.sourceBoosts ? Object.entries(ctx.sourceBoosts).map(([k, v]) => `${k}:${v.toFixed(4)}`).sort().join(",") : "none"}`,
   ];
   const h = createHash('sha256');
   h.update(parts.join('|'));
