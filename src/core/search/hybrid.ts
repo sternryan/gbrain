@@ -1154,6 +1154,10 @@ export async function hybridSearch(
   const { loadSearchModeConfig, resolveSearchMode } = await import('./mode.ts');
   const modeInput = await loadSearchModeConfig(engine);
   const resolvedMode = resolveSearchMode({
+    // Threaded for the `reranker_question_form_only` gate. MUST match the
+    // query passed to the cache resolver below, or a gated read and a gated
+    // write disagree about whether reranking applied.
+    query,
     // T4/D5 — per-call mode selector (e.g. `--mode tokenmax`). The op layer
     // only passes this for trusted/local callers; remote callers leave it
     // undefined and fall through to the server-configured mode (no cost
@@ -2307,6 +2311,7 @@ export async function hybridSearchCached(
   const { loadSearchModeConfig, resolveSearchMode, knobsHash } = await import('./mode.ts');
   const modeInputForCache = await loadSearchModeConfig(engine);
   const resolvedForCache = resolveSearchMode({
+    query,
     // T4/D5 — per-call mode folds into the cache key (resolved_mode is part
     // of knobsHash) so a per-call `--mode tokenmax` read can't be served a
     // server-default-mode cache row.

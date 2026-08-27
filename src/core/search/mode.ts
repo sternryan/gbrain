@@ -23,6 +23,7 @@
  * embedding similarity. See `[CDX-4]` in the plan.
  */
 
+import { isQuestionForm } from './question-form.ts';
 import { createHash } from 'crypto';
 import { CR_MODES, type CRMode } from '../types.ts';
 import { getFtsLanguage } from '../fts-language.ts';
@@ -521,6 +522,11 @@ export interface SearchKeyOverrides {
   searchLimit?: number;
   // v0.35.0.0+ reranker overrides
   reranker_enabled?: boolean;
+  /**
+   * When true, the reranker fires ONLY for natural-language questions.
+   * Narrowing-only: it can turn reranking OFF for a query, never on.
+   */
+  reranker_question_form_only?: boolean;
   reranker_model?: string;
   reranker_top_n_in?: number;
   // CDX2-F16: null is the explicit "don't truncate" signal; undefined
@@ -575,6 +581,7 @@ export interface SearchPerCallOpts {
   searchLimit?: number;
   // v0.35.0.0+ reranker per-call overrides (same shape as SearchKeyOverrides).
   reranker_enabled?: boolean;
+  reranker_question_form_only?: boolean;
   reranker_model?: string;
   reranker_top_n_in?: number;
   reranker_top_n_out?: number | null;
@@ -630,6 +637,13 @@ export interface ResolveSearchModeInput {
   overrides?: SearchKeyOverrides;
   /** Per-call opts (SearchOpts / HybridSearchOpts). */
   perCall?: SearchPerCallOpts;
+  /**
+   * The query text, needed ONLY by the `reranker_question_form_only` gate.
+   * Omitted → the gate cannot classify and leaves `reranker_enabled` alone,
+   * so a caller that forgets to thread it gets today's behaviour, not a
+   * silently-disabled reranker.
+   */
+  query?: string;
 }
 
 export interface ResolvedSearchKnobs extends ModeBundle {
@@ -661,6 +675,29 @@ export function resolveSearchMode(input: ResolveSearchModeInput): ResolvedSearch
   // `search.reranker.timeout_ms` config key.
   // Precedence: per-call > config override > recipe.touchpoints.reranker.default_timeout_ms > mode bundle.
   const resolvedRerankerModel = pick('reranker_model');
+
+  /**
+   * `search.reranker.question_form_only` — narrow reranking to natural-language
+   * questions. Applied HERE, at resolution, and deliberately not at the rerank
+   * call site: `hybridSearchCached` resolves the mode a SECOND time to build the
+   * cache key, so a gate applied downstream would let a keyword query read a
+   * reranked cache row written by a question (and vice versa). Resolving it here
+   * means the existing `rr=` component of knobsHash already reflects the gate —
+   * cache rows segregate correctly with no KNOBS_HASH_VERSION bump and no cache
+   * invalidation. See `infra_cache_makes_a_knob_look_inert`: a knob can be
+   * perfectly implemented and still provably inert because a cache serves rows
+   * keyed without it.
+   *
+   * NARROWING ONLY — it can never enable a reranker that was off.
+   */
+  const gatedRerankerEnabled = (): boolean => {
+    const base = pick('reranker_enabled');
+    if (!base) return false;
+    const gateOn = pc.reranker_question_form_only ?? ov.reranker_question_form_only ?? false;
+    if (!gateOn) return true;
+    if (typeof input.query !== 'string') return true; // un-threaded caller keeps today's behaviour
+    return isQuestionForm(input.query);
+  };
   const pickRerankerTimeoutMs = (): number => {
     if (pc.reranker_timeout_ms !== undefined) return pc.reranker_timeout_ms;
     if (ov.reranker_timeout_ms !== undefined) return ov.reranker_timeout_ms;
@@ -678,7 +715,7 @@ export function resolveSearchMode(input: ResolveSearchModeInput): ResolvedSearch
     tokenBudget: pick('tokenBudget'),
     expansion: pick('expansion'),
     searchLimit: pick('searchLimit'),
-    reranker_enabled: pick('reranker_enabled'),
+    reranker_enabled: gatedRerankerEnabled(),
     reranker_model: resolvedRerankerModel,
     reranker_top_n_in: pick('reranker_top_n_in'),
     reranker_top_n_out: pick('reranker_top_n_out'),
@@ -1255,6 +1292,10 @@ export function loadOverridesFromConfig(
   if (re !== undefined) {
     out.reranker_enabled = re === '1' || re.toLowerCase() === 'true';
   }
+  const rq = get('search.reranker.question_form_only');
+  if (rq !== undefined) {
+    out.reranker_question_form_only = rq === '1' || rq.toLowerCase() === 'true';
+  }
   const rm = get('search.reranker.model');
   if (rm !== undefined && rm.trim().length > 0) {
     out.reranker_model = rm.trim();
@@ -1413,6 +1454,7 @@ export const SEARCH_MODE_CONFIG_KEYS: ReadonlyArray<string> = Object.freeze([
   'search.searchLimit',
   // v0.35.0.0+ reranker keys
   'search.reranker.enabled',
+  'search.reranker.question_form_only',
   'search.reranker.model',
   'search.reranker.top_n_in',
   'search.reranker.top_n_out',

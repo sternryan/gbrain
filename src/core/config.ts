@@ -1232,6 +1232,7 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   'search.cross_modal.llm_intent',
   'search.image_query.max_bytes',
   'search.reranker.enabled',
+  'search.reranker.question_form_only',
   'search.track_retrieval',
   // #4415: per-brain query-intent pattern extensions (JSON bank→regex[]),
   // merged over the shipped banks in src/core/search/query-intent.ts.
