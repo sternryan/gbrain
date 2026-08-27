@@ -66,9 +66,37 @@ export interface ReindexResult {
   reindexed: number;
   skipped: number;
   failed: number;
+  /** Pages that imported "successfully" but yielded zero chunks despite
+   *  having real body/timeline content. These are NOT really reindexed: a
+   *  guard (embed_skip / quarantine / content-sanity gate) suppressed
+   *  chunking, chunker_version does not advance, and the page stays
+   *  unsearchable. Counted under `failed` (never `reindexed`) so the sweep
+   *  can no longer claim success while writing nothing. Content-free stub
+   *  pages (frontmatter-only, by-design empty body — see the "4,222
+   *  stranded" boilerplate stubs) are excluded; see `hasSubstantiveContent`. */
+  noChunks: number;
   dryRun: boolean;
   chunkerVersion: number;
   type: string | null;
+}
+
+/**
+ * True when a parsed page carries real body or timeline text, as opposed to
+ * a content-free stub (frontmatter-only page — e.g. a contact stub created
+ * by design, never expected to chunk). Both `compiled_truth` and `timeline`
+ * are checked because either alone can carry the substantive text a page's
+ * chunks are built from (see the compiled_truth / timeline chunk loop in
+ * `importFromContent`). This is deliberately content-based rather than
+ * keyed off `quarantined` / `flagged` / `embed_skip`: those markers ARE the
+ * failure mode we want to catch (real content, gate suppressed it), so
+ * gating exclusion on them would hide exactly the bug this guard exists to
+ * report.
+ */
+function hasSubstantiveContent(parsedPage: { compiled_truth?: string; timeline?: string } | undefined): boolean {
+  if (!parsedPage) return false;
+  const body = (parsedPage.compiled_truth ?? '').trim();
+  const timeline = (parsedPage.timeline ?? '').trim();
+  return body.length > 0 || timeline.length > 0;
 }
 
 // #3686: real usage, reachable via `gbrain reindex --help` (the generic
@@ -286,7 +314,7 @@ export async function runReindex(engine: BrainEngine, args: string[]): Promise<R
       process.stderr.write(`[reindex] ${payload.error}\n`);
     }
     setCliExitVerdict(2);
-    return { pending: 0, pendingAfter: 0, reindexed: 0, skipped: 0, failed: 0, dryRun: args.includes('--dry-run'), chunkerVersion: MARKDOWN_CHUNKER_VERSION, type: null };
+    return { pending: 0, pendingAfter: 0, reindexed: 0, skipped: 0, failed: 0, noChunks: 0, dryRun: args.includes('--dry-run'), chunkerVersion: MARKDOWN_CHUNKER_VERSION, type: null };
   }
   if (invalidPositiveIntegerFlag(args, '--limit')) {
     const payload = { error: 'invalid --limit: expected a positive integer' };
@@ -296,7 +324,7 @@ export async function runReindex(engine: BrainEngine, args: string[]): Promise<R
       process.stderr.write(`[reindex] ${payload.error}\n`);
     }
     setCliExitVerdict(2);
-    return { pending: 0, pendingAfter: 0, reindexed: 0, skipped: 0, failed: 0, dryRun: args.includes('--dry-run'), chunkerVersion: MARKDOWN_CHUNKER_VERSION, type: null };
+    return { pending: 0, pendingAfter: 0, reindexed: 0, skipped: 0, failed: 0, noChunks: 0, dryRun: args.includes('--dry-run'), chunkerVersion: MARKDOWN_CHUNKER_VERSION, type: null };
   }
   const invalidWorkerFlag = ['--workers', '--concurrency'].find((flag) =>
     invalidPositiveIntegerFlag(args, flag));
@@ -312,7 +340,7 @@ export async function runReindex(engine: BrainEngine, args: string[]): Promise<R
       process.stderr.write(`[reindex] ${error}\n`);
     }
     setCliExitVerdict(2);
-    return { pending: 0, pendingAfter: 0, reindexed: 0, skipped: 0, failed: 0, dryRun: args.includes('--dry-run'), chunkerVersion: MARKDOWN_CHUNKER_VERSION, type: null };
+    return { pending: 0, pendingAfter: 0, reindexed: 0, skipped: 0, failed: 0, noChunks: 0, dryRun: args.includes('--dry-run'), chunkerVersion: MARKDOWN_CHUNKER_VERSION, type: null };
   }
   const opts = parseArgs(args);
   const type = opts.type ?? null;
@@ -326,20 +354,20 @@ export async function runReindex(engine: BrainEngine, args: string[]): Promise<R
       process.stderr.write('Usage: gbrain reindex --markdown [--type PAGE_TYPE] [--limit N] [--dry-run] [--json] [--repo PATH]\n');
     }
     setCliExitVerdict(2);
-    return { pending: 0, pendingAfter: 0, reindexed: 0, skipped: 0, failed: 0, dryRun: !!opts.dryRun, chunkerVersion: MARKDOWN_CHUNKER_VERSION, type };
+    return { pending: 0, pendingAfter: 0, reindexed: 0, skipped: 0, failed: 0, noChunks: 0, dryRun: !!opts.dryRun, chunkerVersion: MARKDOWN_CHUNKER_VERSION, type };
   }
 
   const pending = await countPending(engine, type, !!opts.noEmbed);
 
   if (opts.json && pending === 0) {
-    process.stdout.write(JSON.stringify({ pending: 0, pending_after: 0, reindexed: 0, skipped: 0, failed: 0, chunker_version: MARKDOWN_CHUNKER_VERSION, type }) + '\n');
-    return { pending: 0, pendingAfter: 0, reindexed: 0, skipped: 0, failed: 0, dryRun: !!opts.dryRun, chunkerVersion: MARKDOWN_CHUNKER_VERSION, type };
+    process.stdout.write(JSON.stringify({ pending: 0, pending_after: 0, reindexed: 0, skipped: 0, failed: 0, no_chunks: 0, chunker_version: MARKDOWN_CHUNKER_VERSION, type }) + '\n');
+    return { pending: 0, pendingAfter: 0, reindexed: 0, skipped: 0, failed: 0, noChunks: 0, dryRun: !!opts.dryRun, chunkerVersion: MARKDOWN_CHUNKER_VERSION, type };
   }
 
   if (pending === 0) {
     const scope = type ? ` type=${type}` : '';
     process.stderr.write(`[reindex] All markdown pages${scope} already at chunker_version ${MARKDOWN_CHUNKER_VERSION}. Nothing to do.\n`);
-    return { pending: 0, pendingAfter: 0, reindexed: 0, skipped: 0, failed: 0, dryRun: !!opts.dryRun, chunkerVersion: MARKDOWN_CHUNKER_VERSION, type };
+    return { pending: 0, pendingAfter: 0, reindexed: 0, skipped: 0, failed: 0, noChunks: 0, dryRun: !!opts.dryRun, chunkerVersion: MARKDOWN_CHUNKER_VERSION, type };
   }
 
   const target = typeof opts.limit === 'number' ? Math.min(opts.limit, pending) : pending;
@@ -351,7 +379,7 @@ export async function runReindex(engine: BrainEngine, args: string[]): Promise<R
       const scope = type ? ` (type=${type})` : '';
       process.stderr.write(`[reindex] DRY-RUN: would re-chunk ${target} of ${pending} pending markdown pages${scope}.\n`);
     }
-    return { pending, pendingAfter: pending, reindexed: 0, skipped: 0, failed: 0, dryRun: true, chunkerVersion: MARKDOWN_CHUNKER_VERSION, type };
+    return { pending, pendingAfter: pending, reindexed: 0, skipped: 0, failed: 0, noChunks: 0, dryRun: true, chunkerVersion: MARKDOWN_CHUNKER_VERSION, type };
   }
 
   const reporter = createProgress(cliOptsToProgressOptions(getCliOptions()));
@@ -360,6 +388,7 @@ export async function runReindex(engine: BrainEngine, args: string[]): Promise<R
   let reindexed = 0;
   let skipped = 0;
   let failed = 0;
+  let noChunks = 0;
   let afterId: number | null = null;
   const BATCH = 100;
   const repoPath = opts.repoPath ? resolve(opts.repoPath) : null;
@@ -399,7 +428,13 @@ export async function runReindex(engine: BrainEngine, args: string[]): Promise<R
                 forceRechunk: true,
               });
               if (imported.status === 'imported') {
-                reindexed++;
+                if (imported.chunks === 0 && hasSubstantiveContent(imported.parsedPage)) {
+                  noChunks++;
+                  failed++;
+                  process.stderr.write(`[reindex] ${row.slug}: 0 chunks written from non-empty content — page left UNSEARCHABLE (no_chunks)\n`);
+                } else {
+                  reindexed++;
+                }
               } else if (imported.status === 'error') {
                 process.stderr.write(`[reindex] ${row.slug}: ${imported.error ?? 'import failed'}\n`);
                 failed++;
@@ -435,7 +470,13 @@ export async function runReindex(engine: BrainEngine, args: string[]): Promise<R
             forceRechunk: true,
           });
           if (imported.status === 'imported') {
-            reindexed++;
+            if (imported.chunks === 0 && hasSubstantiveContent(imported.parsedPage)) {
+              noChunks++;
+              failed++;
+              process.stderr.write(`[reindex] ${row.slug}: 0 chunks written from non-empty content — page left UNSEARCHABLE (no_chunks)\n`);
+            } else {
+              reindexed++;
+            }
           } else if (imported.status === 'error') {
             process.stderr.write(`[reindex] ${row.slug}: ${imported.error ?? 'import failed'}\n`);
             failed++;
@@ -465,6 +506,7 @@ export async function runReindex(engine: BrainEngine, args: string[]): Promise<R
     reindexed,
     skipped,
     failed,
+    noChunks,
     dryRun: false,
     chunkerVersion: MARKDOWN_CHUNKER_VERSION,
     type,
@@ -472,13 +514,16 @@ export async function runReindex(engine: BrainEngine, args: string[]): Promise<R
 
   if (opts.json) {
     process.stdout.write(JSON.stringify({
-      pending, pending_after: pendingAfter, reindexed, skipped, failed,
+      pending, pending_after: pendingAfter, reindexed, skipped, failed, no_chunks: noChunks,
       chunker_version: MARKDOWN_CHUNKER_VERSION,
       type,
     }) + '\n');
   } else {
     const scope = type ? ` type=${type}` : '';
-    process.stderr.write(`[reindex] Done.${scope} reindexed=${reindexed} skipped=${skipped} failed=${failed} pending_before=${pending} pending_after=${pendingAfter}\n`);
+    process.stderr.write(`[reindex] Done.${scope} reindexed=${reindexed} skipped=${skipped} failed=${failed} no_chunks=${noChunks} pending_before=${pending} pending_after=${pendingAfter}\n`);
+    if (noChunks > 0) {
+      process.stderr.write(`[reindex] WARNING: ${noChunks} page(s) imported but produced ZERO chunks and remain unsearchable. reindex cannot fix these — a write path that strips gate markers (MCP put_page) or clearing the blocking frontmatter marker is required.\n`);
+    }
   }
 
   return result;
