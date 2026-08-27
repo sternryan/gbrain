@@ -17,7 +17,7 @@
 
 import { describe, test, expect, beforeAll, afterAll, beforeEach } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
-import { runReindex } from '../src/commands/reindex.ts';
+import { runReindex, BOILERPLATE_STUB_PATTERNS } from '../src/commands/reindex.ts';
 import { MARKDOWN_CHUNKER_VERSION } from '../src/core/chunkers/recursive.ts';
 import { _resetCliExitVerdictForTests, currentExitCode } from '../src/core/cli-force-exit.ts';
 
@@ -163,5 +163,81 @@ describe('gbrain reindex --markdown: zero-chunk guard', () => {
 
     expect(json.no_chunks).toBe(1);
     expect(json.failed).toBe(1);
+  });
+});
+
+describe('gbrain reindex --markdown: boilerplate-stub predicate (mirrors hearth gbrain-stranded-check.sh)', () => {
+  // Pads by repeating `text` (never with bare trailing whitespace — the
+  // DB-only reindex path round-trips content through serializeMarkdown /
+  // parseMarkdown, which trims trailing whitespace, so a naive
+  // whitespace-only pad silently shrinks back down before the chunker ever
+  // sees it).
+  function padTo(text: string, length: number): string {
+    let out = text;
+    while (out.length < length) out += text;
+    out = out.slice(0, length);
+    if (/\s$/.test(out)) out = out.slice(0, -1) + '.';
+    return out;
+  }
+
+  test('short body (<1000 chars) containing a boilerplate stub pattern + 0 chunks → NOT counted as no_chunks', async () => {
+    const body = padTo('Auto-discovered entity stub. ', 300);
+    expect(body.length).toBeLessThan(1000);
+    expect(body).toContain('Auto-discovered entity stub');
+    await seedLegacyPage('short-stub', body);
+    await engine.executeRaw(
+      `UPDATE pages SET frontmatter = '{"embed_skip": {"bytes": 1}}'::jsonb WHERE slug = 'short-stub'`,
+    );
+
+    const { result, stderr } = await captureStderr(() =>
+      runReindex(engine, ['--markdown', '--no-embed']),
+    );
+
+    expect(result.noChunks).toBe(0);
+    expect(result.failed).toBe(0);
+    expect(result.reindexed).toBe(1);
+    expect(stderr).not.toContain('UNSEARCHABLE');
+  });
+
+  test('the SAME stub text padded past 1000 chars + 0 chunks → IS counted as no_chunks (length gate wins)', async () => {
+    const body = padTo('Auto-discovered entity stub. ', 1200);
+    expect(body.length).toBeGreaterThanOrEqual(1200);
+    expect(body).toContain('Auto-discovered entity stub');
+    await seedLegacyPage('long-stub-text', body);
+    await engine.executeRaw(
+      `UPDATE pages SET frontmatter = '{"embed_skip": {"bytes": 1}}'::jsonb WHERE slug = 'long-stub-text'`,
+    );
+
+    const { result, stderr } = await captureStderr(() =>
+      runReindex(engine, ['--markdown', '--no-embed']),
+    );
+
+    expect(result.noChunks).toBe(1);
+    expect(result.failed).toBe(1);
+    expect(result.reindexed).toBe(0);
+    expect(stderr).toContain('long-stub-text');
+    expect(stderr).toContain('UNSEARCHABLE');
+  });
+
+  test('real 300-char body with no boilerplate pattern + 0 chunks → IS counted as no_chunks', async () => {
+    const body = padTo('This is genuine prose about a real topic with no stub markers at all. ', 300);
+    expect(body.length).toBeLessThan(1000);
+    for (const pattern of BOILERPLATE_STUB_PATTERNS) {
+      expect(body).not.toContain(pattern);
+    }
+    await seedLegacyPage('real-short-body', body);
+    await engine.executeRaw(
+      `UPDATE pages SET frontmatter = '{"embed_skip": {"bytes": 1}}'::jsonb WHERE slug = 'real-short-body'`,
+    );
+
+    const { result, stderr } = await captureStderr(() =>
+      runReindex(engine, ['--markdown', '--no-embed']),
+    );
+
+    expect(result.noChunks).toBe(1);
+    expect(result.failed).toBe(1);
+    expect(result.reindexed).toBe(0);
+    expect(stderr).toContain('real-short-body');
+    expect(stderr).toContain('UNSEARCHABLE');
   });
 });

@@ -81,22 +81,58 @@ export interface ReindexResult {
 }
 
 /**
- * True when a parsed page carries real body or timeline text, as opposed to
- * a content-free stub (frontmatter-only page — e.g. a contact stub created
- * by design, never expected to chunk). Both `compiled_truth` and `timeline`
- * are checked because either alone can carry the substantive text a page's
- * chunks are built from (see the compiled_truth / timeline chunk loop in
- * `importFromContent`). This is deliberately content-based rather than
- * keyed off `quarantined` / `flagged` / `embed_skip`: those markers ARE the
- * failure mode we want to catch (real content, gate suppressed it), so
- * gating exclusion on them would hide exactly the bug this guard exists to
- * report.
+ * Boilerplate phrases stamped into the ~4,219 intentionally-chunkless stub
+ * pages (contact stubs, auto-discovered entities, unlinked placeholders —
+ * see memory `infra_gbrain_stranded_pages_are_boilerplate`). SOURCE OF
+ * TRUTH: mirrors the substance test in the ratified hearth script
+ * `/opt/gbrain-guard/gbrain-stranded-check.sh` EXACTLY — a page with
+ * `compiled_truth.length < 1000` containing any of these strings is a
+ * by-design stub, not a chunking failure. Keep this list byte-for-byte in
+ * sync with that script; do not add/remove patterns here without updating
+ * it there too (and vice versa).
+ */
+export const BOILERPLATE_STUB_PATTERNS = [
+  'been compiled yet',
+  'been linked yet',
+  'No further context available',
+  'Auto-discovered entity stub',
+] as const;
+
+const BOILERPLATE_STUB_MAX_LENGTH = 1000;
+
+/**
+ * True when `compiled_truth` is a by-design boilerplate stub rather than
+ * real prose that failed to chunk. Mirrors the hearth stranded-page check
+ * (see `BOILERPLATE_STUB_PATTERNS`) exactly: short body + a known stub
+ * phrase. A short body that does NOT carry one of these phrases (e.g. a
+ * genuine one-line note) is real content and is NOT a stub.
+ */
+function isBoilerplateStub(compiledTruth: string): boolean {
+  if (compiledTruth.length >= BOILERPLATE_STUB_MAX_LENGTH) return false;
+  return BOILERPLATE_STUB_PATTERNS.some((pattern) => compiledTruth.includes(pattern));
+}
+
+/**
+ * True when a parsed page carries content that SHOULD have produced chunks,
+ * as opposed to (a) a genuinely empty page or (b) a by-design boilerplate
+ * stub (see `isBoilerplateStub`). `compiled_truth` is checked against the
+ * boilerplate-stub predicate because that is the class the hearth script
+ * exists to exclude; `timeline` is checked only for non-emptiness — the
+ * chunker DOES chunk timeline text (see the compiled_truth / timeline
+ * chunk loop in `importFromContent`), and the ratified stub check never
+ * covers timeline-only pages, so any non-empty timeline counts as real
+ * content. This is deliberately content-based rather than keyed off
+ * `quarantined` / `flagged` / `embed_skip`: those markers ARE the failure
+ * mode we want to catch (real content, gate suppressed it), so gating
+ * exclusion on them would hide exactly the bug this guard exists to report.
  */
 function hasSubstantiveContent(parsedPage: { compiled_truth?: string; timeline?: string } | undefined): boolean {
   if (!parsedPage) return false;
   const body = (parsedPage.compiled_truth ?? '').trim();
   const timeline = (parsedPage.timeline ?? '').trim();
-  return body.length > 0 || timeline.length > 0;
+  if (timeline.length > 0) return true;
+  if (body.length === 0) return false;
+  return !isBoilerplateStub(body);
 }
 
 // #3686: real usage, reachable via `gbrain reindex --help` (the generic
