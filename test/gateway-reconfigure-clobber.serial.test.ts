@@ -114,7 +114,12 @@ describe('reconfigureGatewayWithEngine — no-clobber', () => {
     expect(getChatModel()).toBe(TIER_DEFAULTS.reasoning);
   });
 
-  test('openai-only, no pin → key-aware tier default routes chat to openai', async () => {
+  test('openai-only, default host, no discovery data → static OpenAI tier default', async () => {
+    // Pre-fix this routed to the static openai guess (openai:gpt-5.6-style)
+    // even with zero evidence that id is reachable through whatever
+    // OPENAI_BASE_URL is configured (the P0: a local litellm gateway
+    // serving only local model names). With no discovery cache, implicit
+    // key-presence auto-detection must fall through instead of guessing.
     writeFileConfig({ openai_api_key: 'sk-file-plane' });
     configureGateway({ env: { OPENAI_API_KEY: 'sk-test' } });
     await reconfigureGatewayWithEngine(stub as never);

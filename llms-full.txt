@@ -5471,12 +5471,16 @@ money]` — the deliberately-priced slow verb. Prefer `recall`/`entity` for
 lookups; use synthesize only when the answer requires combining evidence
 across pages.
 
-Response: `{ answer, sources[], gaps[], cost{model, input_tokens,
+Response: `{ answer, sources[], gaps[], cost{status, model, input_tokens,
 output_tokens, usd_estimate}, protocol_version }`.
 
 - The `cost` block is a BEST-EFFORT AGGREGATE (retries/multi-call flows sum;
   cache hits may undercount; token fields are `null` when a provider returns
   no accounting). Honest signal, not an invoice.
+- `cost.status` is `success` only when composition succeeded; non-2xx and
+  malformed responses report `failed`, even when the provider supplied no usage.
+  Legacy/internal result shapes that omit composition status report `unknown`
+  rather than optimistic success.
 - No LLM configured ⇒ the protocol error `unavailable` with a fix — never a
   fake answer.
 

@@ -32,8 +32,17 @@ let tmp: string;
 let auditPath: string;
 let stderrCapture: string;
 let origStderrWrite: typeof process.stderr.write;
+let savedGatewayEnv: Record<string, string | undefined>;
 
 beforeEach(() => {
+  savedGatewayEnv = {
+    OPENAI_BASE_URL: process.env.OPENAI_BASE_URL,
+    GBRAIN_GATEWAY_LANE_UTILITY: process.env.GBRAIN_GATEWAY_LANE_UTILITY,
+    GBRAIN_GATEWAY_LANE_HEAVY: process.env.GBRAIN_GATEWAY_LANE_HEAVY,
+  };
+  delete process.env.OPENAI_BASE_URL;
+  delete process.env.GBRAIN_GATEWAY_LANE_UTILITY;
+  delete process.env.GBRAIN_GATEWAY_LANE_HEAVY;
   tmp = mkdtempSync(join(tmpdir(), 'gbrain-budget-test-'));
   auditPath = join(tmp, 'budget.jsonl');
   _resetBudgetTrackerWarningsForTest();
@@ -48,6 +57,10 @@ beforeEach(() => {
 afterEach(() => {
   (process.stderr as { write: unknown }).write = origStderrWrite;
   rmSync(tmp, { recursive: true, force: true });
+  for (const [key, value] of Object.entries(savedGatewayEnv)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
 });
 
 function readAudit(): Array<Record<string, unknown>> {
@@ -203,6 +216,27 @@ describe('BudgetTracker.reserve', () => {
       'openai:gpt-5.2',
       'google:gemini-2.0-flash',
     ]);
+  });
+
+  test('configured gateway lane reserves at zero while an unconfigured advertised id stays unpriced', () => {
+    process.env.OPENAI_BASE_URL = 'http://127.0.0.1:8088/v1';
+    process.env.GBRAIN_GATEWAY_LANE_HEAVY = 'hetzner-qwen38';
+
+    const configured = new BudgetTracker({ maxCostUsd: 0.001, label: 'test', auditPath });
+    expect(() => configured.reserve({
+      modelId: 'openai:hetzner-qwen38',
+      estimatedInputTokens: 1_000_000,
+      maxOutputTokens: 1_000_000,
+      kind: 'chat',
+    })).not.toThrow();
+
+    const unknown = new BudgetTracker({ maxCostUsd: 1, label: 'test', auditPath });
+    expect(() => unknown.reserve({
+      modelId: 'openai:hammer-9b',
+      estimatedInputTokens: 100,
+      maxOutputTokens: 100,
+      kind: 'chat',
+    })).toThrow(expect.objectContaining({ reason: 'no_pricing' }));
   });
 
   test('no cap + unknown pricing: warns once per process, no throw', () => {

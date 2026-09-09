@@ -22,11 +22,17 @@
 
 import type { ConfigReader } from './config-snapshot.ts';
 import { splitProviderModelId } from './model-id.ts';
+import { resolvedGatewayLaneNames } from './model-pricing.ts';
 import type { GBrainConfig } from './config.ts';
 import { loadConfig } from './config.ts';
 import { mergedProviderEnv } from './ai/provider-env.ts';
 import { RECIPES } from './ai/recipes/index.ts';
-import { latestOpenAITiers, rankOpenAIChatModels } from './ai/openai-latest.ts';
+import {
+  latestOpenAITiers,
+  latestOpenAINegativeDiscovery,
+  latestOpenAIObservedModelIds,
+  rankOpenAIChatModels,
+} from './ai/openai-latest.ts';
 
 export type ModelTier = 'utility' | 'reasoning' | 'deep' | 'subagent';
 
@@ -139,14 +145,85 @@ function discoveredOrStaticOpenAITier(tier: ModelTier): string {
   return typeof discovered === 'string' ? discovered : openaiStaticTierFallback()[tier];
 }
 
+/**
+ * Resolve implicit OpenAI defaults from positive or negative discovery
+ * evidence. Cache-cold on the official host retains the upstream static
+ * fallback; a non-default host without evidence falls through loudly.
+ *
+ * P0 (2026-09-08): an `OPENAI_API_KEY` pointed at a non-OpenAI-compatible
+ * gateway (e.g. a local litellm proxy serving only local model names like
+ * `local-heavy`) never produces a match in `rankOpenAIChatModels` (its id
+ * grammar only recognizes `gpt-*`/`o[1-9]*` shapes) — discovery legitimately
+ * finds nothing. The OLD code then fell back to `openaiStaticTierFallback()`,
+ * handing back a literal real-OpenAI id (`openai:gpt-5.6`) that the gateway
+ * in front of that key can never serve. litellm 400s, and the caller (think/
+ * synthesize, facts extraction) degraded silently instead of failing loud.
+ *
+ * Successful negative discovery preserves the observed ids and selects a
+ * gateway-local chat lane; if none exists, returning null reaches the loud
+ * unconfigured-provider path instead of sending a guessed OpenAI id.
+ */
+const _warnedInvalidOpenAIBaseUrls = new Set<string>();
+
+function isNonDefaultOpenAIBaseUrl(env: Record<string, string>): boolean {
+  const raw = env.OPENAI_BASE_URL?.trim();
+  if (!raw) return false;
+  try { return new URL(raw).hostname.toLowerCase() !== 'api.openai.com'; }
+  catch {
+    if (!_warnedInvalidOpenAIBaseUrls.has(raw)) {
+      _warnedInvalidOpenAIBaseUrls.add(raw);
+      process.stderr.write(`[models] invalid OPENAI_BASE_URL "${raw}"; treating it as a non-default gateway\n`);
+    }
+    return true;
+  }
+}
+
+function isChatShapedGatewayId(id: string): boolean {
+  // Gateway lane names are operator-defined, so positive chat-family
+  // grammars reject legitimate names such as `hetzner-qwen38`. The lane
+  // match below supplies the positive evidence; this guard only excludes
+  // catalogue entries that are clearly a different modality.
+  return !/(?:embedding|image|dall-e|moderation|whisper|(?:^|[-_.])tts(?:[-_.]|$)|audio|realtime|transcri)/i.test(id);
+}
+
+function pickGatewayChatModel(tier: ModelTier, ids: string[], env: Record<string, string>): string | null {
+  const candidates = ids.filter((id) => isChatShapedGatewayId(id));
+  const lanes = resolvedGatewayLaneNames(env);
+  const lane = tier === 'utility' ? lanes.utility : lanes.heavy;
+  // Exact configured-lane evidence only. A missing heavy lane must never
+  // silently downgrade reasoning/deep/subagent to the fast lane (or to the
+  // first arbitrary catalogue entry).
+  const picked = candidates.find((id) => id.toLowerCase() === lane.toLowerCase());
+  // Emit the ADVERTISED id (N22): a gateway that matches names case-sensitively
+  // must receive the spelling it published; pricing folds case on its side.
+  return picked ? `openai:${picked}` : null;
+}
+
+function discoveredOpenAITierOrNull(tier: ModelTier, env: Record<string, string>): string | null {
+  const nonDefaultHost = isNonDefaultOpenAIBaseUrl(env);
+  const discovered = latestOpenAITiers(tier);
+  if (typeof discovered === 'string') {
+    // Successful responses persist their observed catalogue. On gateways,
+    // never return a tier pick that the same fresh observation did not list.
+    const observed = latestOpenAIObservedModelIds();
+    const advertised = discovered.startsWith('openai:') ? discovered.slice('openai:'.length) : discovered;
+    if (!nonDefaultHost || (observed !== null && observed.includes(advertised))) return discovered;
+  }
+  const negative = latestOpenAINegativeDiscovery();
+  if (nonDefaultHost && negative) return pickGatewayChatModel(tier, negative.modelIds, env);
+  return nonDefaultHost ? null : openaiStaticTierFallback()[tier];
+}
+
 export const PROVIDER_TIER_DEFAULTS: ReadonlyArray<{
   provider: 'anthropic' | 'openai';
   envKey: string;
-  tiers: (tier: ModelTier) => string;
+  tiers: (tier: ModelTier, env: Record<string, string>) => string | null;
 }> = [
   { provider: 'anthropic', envKey: 'ANTHROPIC_API_KEY', tiers: (tier) => TIER_DEFAULTS[tier] },
-  { provider: 'openai', envKey: 'OPENAI_API_KEY', tiers: discoveredOrStaticOpenAITier },
+  { provider: 'openai', envKey: 'OPENAI_API_KEY', tiers: discoveredOpenAITierOrNull },
 ];
+
+const _loggedTierDefaultChoices = new Set<string>();
 
 /** loadConfig, throw-safe (the hasAnthropicKey pattern): unreadable config = env-only. */
 function throwSafeLoadConfig(): GBrainConfig | null {
@@ -176,9 +253,36 @@ export function resolveTierDefault(
 ): string {
   const merged = env ? realEnv(env) : mergedProviderEnv(throwSafeLoadConfig(), process.env);
   for (const entry of PROVIDER_TIER_DEFAULTS) {
-    if (merged[entry.envKey]) return entry.tiers(tier);
+    if (!merged[entry.envKey]) continue;
+    const picked = entry.tiers(tier, merged);
+    // A present key with no verified-servable pick (the P0 case: an
+    // OPENAI_API_KEY pointed at a gateway that isn't real OpenAI) does NOT
+    // stop the scan — fall through to the next provider / the hardcoded
+    // floor rather than fabricating a model id nothing confirmed is usable.
+    if (picked) {
+      logResolvedTierDefaultOnce(tier, entry.provider, picked);
+      return picked;
+    }
   }
+  logResolvedTierDefaultOnce(tier, null, TIER_DEFAULTS[tier]);
   return TIER_DEFAULTS[tier];
+}
+
+/**
+ * Ruling #5: the resolver logs which model it chose for a tier, once per
+ * (tier, model) per process — cheap self-check/journal signal without
+ * spamming stderr on every synthesize/extract call.
+ */
+function logResolvedTierDefaultOnce(
+  tier: ModelTier,
+  provider: 'anthropic' | 'openai' | null,
+  model: string,
+): void {
+  const key = `${tier}:${model}`;
+  if (_loggedTierDefaultChoices.has(key)) return;
+  _loggedTierDefaultChoices.add(key);
+  const via = provider ? `key-aware default (${provider})` : 'hardcoded floor (no provider key servable)';
+  process.stderr.write(`[models] tier default for "${tier}" resolved to "${model}" via ${via}\n`);
 }
 
 /**
@@ -585,4 +689,6 @@ export function _resetDeprecationWarningsForTest(): void {
   _deprecationWarningsEmitted.clear();
   _subagentTierWarningsEmitted.clear();
   _unservablePinWarningsEmitted.clear();
+  _loggedTierDefaultChoices.clear();
+  _warnedInvalidOpenAIBaseUrls.clear();
 }

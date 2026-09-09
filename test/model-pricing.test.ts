@@ -22,9 +22,10 @@ import {
 import { ANTHROPIC_PRICING } from '../src/core/anthropic-pricing.ts';
 import { MODEL_PRICING } from '../src/core/takes-quality-eval/pricing.ts';
 import { estimateAnthropicCost } from '../src/core/brain-score-recommendations.ts';
+import { isModelPriceable } from '../src/core/budget/budget-tracker.ts';
 
 describe('CANONICAL_PRICING — table integrity', () => {
-  test('every entry has finite positive rates and a provider-prefixed key', () => {
+  test('every canonical table entry has finite positive rates', () => {
     for (const [key, p] of Object.entries(CANONICAL_PRICING)) {
       expect(Number.isFinite(p.input)).toBe(true);
       expect(Number.isFinite(p.output)).toBe(true);
@@ -105,6 +106,43 @@ describe('CANONICAL_PRICING — table integrity', () => {
 });
 
 describe('canonicalLookup — id normalization', () => {
+  test('only configured gateway lanes are free behind a verified non-default OpenAI base URL', () => {
+    expect(canonicalLookup('openai:local-fast', { OPENAI_BASE_URL: 'http://127.0.0.1:8088/v1' }))
+      .toEqual({ input: 0, output: 0 });
+    expect(canonicalLookup('openai:local-heavy', { OPENAI_BASE_URL: 'https://gateway.example/v1' }))
+      .toEqual({ input: 0, output: 0 });
+    expect(canonicalLookup('openai:local-fast', {})).toBeUndefined();
+    expect(canonicalLookup('openai:local-heavy', { OPENAI_BASE_URL: 'https://api.openai.com/v1' }))
+      .toBeUndefined();
+    expect(canonicalLookup('openai:local-heavy', { OPENAI_BASE_URL: 'not a url' }))
+      .toBeUndefined();
+    expect(isModelPriceable('openai:local-heavy', 'chat', undefined, {
+      OPENAI_BASE_URL: 'https://api.openai.com/v1',
+    })).toBe(false);
+    expect(isModelPriceable('openai:local-heavy', 'chat', undefined, {
+      OPENAI_BASE_URL: 'http://127.0.0.1:8088/v1',
+    })).toBe(true);
+
+    const customGateway = {
+      OPENAI_BASE_URL: 'http://127.0.0.1:8088/v1',
+      GBRAIN_GATEWAY_LANE_HEAVY: 'hetzner-qwen38',
+    };
+    expect(canonicalLookup('openai:hetzner-qwen38', customGateway))
+      .toEqual({ input: 0, output: 0 });
+    expect(isModelPriceable('openai:hetzner-qwen38', 'chat', undefined, customGateway)).toBe(true);
+    expect(canonicalLookup('openai:hammer-9b', customGateway)).toBeUndefined();
+    expect(isModelPriceable('openai:hammer-9b', 'chat', undefined, customGateway)).toBe(false);
+
+    const official = {
+      ...customGateway,
+      OPENAI_BASE_URL: 'https://api.openai.com/v1',
+    };
+    expect(canonicalLookup('openai:hetzner-qwen38', official)).toBeUndefined();
+    expect(isModelPriceable('openai:hetzner-qwen38', 'chat', undefined, official)).toBe(false);
+    expect(canonicalLookup('openai:hammer-9b', official)).toBeUndefined();
+    expect(isModelPriceable('openai:hammer-9b', 'chat', undefined, official)).toBe(false);
+  });
+
   test('bare anthropic id → hit (defaults to anthropic provider)', () => {
     expect(canonicalLookup('claude-opus-4-8')).toMatchObject({ input: 5.0, output: 25.0 });
   });
@@ -250,4 +288,14 @@ describe('canonicalLookup — case-insensitive fallback (#4123 / TODOS case-sens
       folded.set(lower, key);
     }
   });
+});
+
+test('N21: a configured gateway lane named after a real priced model keeps its real price', () => {
+  const env = { OPENAI_BASE_URL: 'http://127.0.0.1:8088/v1', GBRAIN_GATEWAY_LANE_HEAVY: 'gpt-5.6' };
+  const real = canonicalLookup('openai:gpt-5.6');
+  expect(real).toBeDefined();
+  expect(real!.input).toBeGreaterThan(0);
+  expect(canonicalLookup('openai:gpt-5.6', env)).toEqual(real);
+  // the default free lane still prices $0 behind the gateway
+  expect(canonicalLookup('openai:local-fast', env)).toEqual({ input: 0, output: 0 });
 });

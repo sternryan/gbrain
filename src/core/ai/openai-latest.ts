@@ -59,7 +59,7 @@ export interface OpenAITierPick {
 interface ModelCacheFile {
   version: 1;
   openai?: {
-    tiers: OpenAITierPick;
+    tiers?: OpenAITierPick;
     fetched_at: string;
     /** Newest family seen on the account with NO canonical pricing row (informational). */
     newest_unpriced?: string;
@@ -72,6 +72,8 @@ interface ModelCacheFile {
      * first reconfigure, not the 24h TTL.
      */
     fingerprint?: string;
+    ranked_none?: true;
+    observed_model_ids?: string[];
   };
   /**
    * Last refresh ATTEMPT (success or fail). Persisted so the failure backoff
@@ -86,6 +88,8 @@ interface ModelCacheFile {
 }
 
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+/** Negative gateway discovery is volatile: local lane names can change on restart. */
+export const NEGATIVE_DISCOVERY_TTL_MS = 10 * 60 * 1000;
 const FETCH_TIMEOUT_MS = 3_000;
 
 function cachePath(): string {
@@ -233,6 +237,17 @@ export function latestOpenAITiers(tier?: ModelTier): OpenAITierPick | string | n
   return tier ? cached[tier] : cached;
 }
 
+export function latestOpenAINegativeDiscovery(): { rankedNone: true; modelIds: string[] } | null {
+  const cached = readCacheFile()?.openai;
+  if (!cached?.ranked_none) return null;
+  return { rankedNone: true, modelIds: cached.observed_model_ids ?? [] };
+}
+
+/** IDs from the latest successful non-empty response, when the cache has them. */
+export function latestOpenAIObservedModelIds(): string[] | null {
+  return readCacheFile()?.openai?.observed_model_ids ?? null;
+}
+
 /* ── refresh (async, throttled, fail-open) ────────────────────────────────── */
 
 let _refreshInFlight: Promise<void> | null = null;
@@ -331,8 +346,9 @@ export async function refreshLatestOpenAIModels(opts: RefreshOpts = {}): Promise
   // TTL and backoff are per-identity: a key/endpoint switch within either
   // window must refresh immediately (the cached tiers/attempt belong to the
   // previous account).
+  const cacheTtlMs = cached?.ranked_none ? NEGATIVE_DISCOVERY_TTL_MS : CACHE_TTL_MS;
   if (!opts.force && cached && cached.fingerprint === fp
-    && Date.now() - Date.parse(cached.fetched_at) < CACHE_TTL_MS) return;
+    && Date.now() - Date.parse(cached.fetched_at) < cacheTtlMs) return;
   const persistedAttempt = cacheFile?.last_attempt_fingerprint === fp
     ? Date.parse(cacheFile?.last_attempt_at ?? '') || 0 : 0;
   const moduleAttempt = _lastAttemptFp === fp ? _lastAttemptAt : 0;
@@ -351,6 +367,8 @@ export async function refreshLatestOpenAIModels(opts: RefreshOpts = {}): Promise
       if (!res.ok) { stampAttempt(fp); return; }
       const body = (await res.json()) as { data?: Array<{ id?: string }> };
       const ids = (body.data ?? []).map((m) => m.id).filter((x): x is string => typeof x === 'string');
+      // A warming proxy can return 200 + an empty catalogue. That is an
+      // attempt, not evidence that a previously working model disappeared.
       if (ids.length === 0) { stampAttempt(fp); return; }
       const { tiers, newestUnpriced } = rankOpenAIChatModels(ids);
       if (newestUnpriced && _warnedUnpriced !== newestUnpriced) {
@@ -361,9 +379,18 @@ export async function refreshLatestOpenAIModels(opts: RefreshOpts = {}): Promise
         );
       }
       if (!tiers) {
-        // In-grammar ids but none priced: stamp the attempt so offline/
-        // misconfigured shells don't re-pay the fetch on every invocation.
-        stampAttempt(fp);
+        writeCacheFile({
+          version: 1,
+          openai: {
+            fetched_at: new Date().toISOString(),
+            fingerprint: fp,
+            ranked_none: true,
+            observed_model_ids: ids,
+            ...(newestUnpriced ? { newest_unpriced: newestUnpriced } : {}),
+          },
+          last_attempt_at: new Date().toISOString(),
+          last_attempt_fingerprint: fp,
+        });
         return;
       }
       writeCacheFile({
@@ -372,6 +399,7 @@ export async function refreshLatestOpenAIModels(opts: RefreshOpts = {}): Promise
           tiers,
           fetched_at: new Date().toISOString(),
           fingerprint: fp,
+          observed_model_ids: ids,
           ...(newestUnpriced ? { newest_unpriced: newestUnpriced } : {}),
         },
         last_attempt_at: new Date().toISOString(),

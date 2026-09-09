@@ -890,7 +890,7 @@ export async function resolveChatByEnv(out: ResolvedAIOptions): Promise<void> {
       // (discovered-latest for OpenAI, recipe entry otherwise).
       const { resolveTierDefault } = await import('../core/model-config.ts');
       const effective = resolveTierDefault('reasoning');
-      const shown = effective.startsWith(`${r.id}:`) ? effective : `${r.id}:${tp.models[0]}`;
+      const shown = effective;
       console.error(
         `Detected ${r.auth_env?.required?.[0] ?? r.id} env var. Chat + fact extraction will use ` +
         `${shown} (key-aware default; nothing written to config).`,

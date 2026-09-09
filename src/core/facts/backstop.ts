@@ -160,22 +160,25 @@ const KEYLESS_NOTE =
  * the engine-blind detectCapabilities() — a servable DB-plane override must
  * never classify as keyless (CX1).
  */
-export async function classifyUnavailable(model: string | undefined): Promise<'keyless' | 'keyed'> {
+export async function classifyUnavailable(
+  model: string | undefined,
+  opts: { env?: Record<string, string | undefined>; config?: import('../config.ts').GBrainConfig | null } = {},
+): Promise<'keyless' | 'keyed'> {
   const { mergedProviderEnv } = await import('../ai/provider-env.ts');
-  const { providerKeyReady, PROVIDER_TIER_DEFAULTS } = await import('../model-config.ts');
-  let cfg = null;
+  const { providerKeyReady, resolveTierDefault } = await import('../model-config.ts');
+  let cfg = opts.config ?? null;
   try {
     const { loadConfig } = await import('../config.ts');
-    cfg = loadConfig();
+    if (opts.config === undefined) cfg = loadConfig();
   } catch {
     // Fail toward RETRY, not calm consumption (loadConfig swallows file
     // errors itself, so this only fires on pathological import failures).
     return 'keyed';
   }
-  const merged = mergedProviderEnv(cfg, process.env);
+  const merged = mergedProviderEnv(cfg, opts.env ?? process.env);
   if (model && providerKeyReady(model, merged)) return 'keyed';
-  const anyChatKey = PROVIDER_TIER_DEFAULTS.some((e) => !!merged[e.envKey]);
-  if (!anyChatKey) {
+  const anyServableChat = providerKeyReady(resolveTierDefault('reasoning', merged), merged);
+  if (!anyServableChat && opts.config === undefined) {
     // Before declaring keyless, check for a config file that EXISTS but
     // yielded nothing (EACCES, disk error, corrupt JSON — loadConfig returns
     // null for all of them, indistinguishable from "no config"). That file
@@ -189,7 +192,7 @@ export async function classifyUnavailable(model: string | undefined): Promise<'k
       return 'keyed';
     }
   }
-  return anyChatKey ? 'keyed' : 'keyless';
+  return anyServableChat ? 'keyed' : 'keyless';
 }
 
 /**

@@ -39,7 +39,7 @@ const origWrite = process.stderr.write.bind(process.stderr);
 // only OPENAI_API_KEY (or carries keys in config.json). Save/delete the key
 // envs and point GBRAIN_HOME at a nonexistent dir so the config read misses —
 // local runs then match keyless CI byte-for-byte.
-const PINNED_ENV_KEYS = ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'GBRAIN_HOME'] as const;
+const PINNED_ENV_KEYS = ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'OPENAI_BASE_URL', 'GBRAIN_HOME'] as const;
 let savedEnv: Record<string, string | undefined>;
 
 beforeEach(() => {
@@ -337,19 +337,24 @@ describe('resolveTierDefault — key-aware matrix (injected env used exclusively
     expect(resolveTierDefault('subagent', env)).toBe(TIER_DEFAULTS.subagent);
   });
 
-  test('openai-only → recipe-ranked openai tier defaults (no literal pins anywhere)', () => {
+  test('openai-only, default host, cold cache → static recipe-ranked defaults', () => {
+    // Pre-fix, mere OPENAI_API_KEY presence auto-selected a hardcoded static
+    // OpenAI id (e.g. "openai:gpt-5.6") even when nothing confirmed that id
+    // is reachable through whatever OPENAI_BASE_URL is configured. On
+    // hearth, OPENAI_API_KEY is set but OPENAI_BASE_URL points at a local
+    // litellm gateway that serves only local model names — the static guess
+    // 400s there and the synthesize/facts-extract callers degraded silently
+    // instead of failing loud. The fix: implicit key-presence auto-detection
+    // may only use a REAL discovered model (see openai-latest.serial.test.ts
+    // for the discovered-tiers-overlay case); with no discovery data it must
+    // fall through to the next provider / the hardcoded TIER_DEFAULTS floor,
+    // which is what triggers the existing NO_ANTHROPIC_API_KEY loud-failure
+    // path downstream instead of a plausible-looking wrong model id.
     const env = { OPENAI_API_KEY: 'sk-test' };
     const fallback = openaiStaticTierFallback();
-    // Behavioral, not literal: the expected ids derive from the openai
-    // recipe's chat list through the shared ranking grammar — updating the
-    // recipe at a release updates this test's expectations automatically.
-    expect(resolveTierDefault('reasoning', env)).toBe(fallback.reasoning);
-    expect(resolveTierDefault('utility', env)).toBe(fallback.utility);
-    expect(resolveTierDefault('deep', env)).toBe(fallback.deep);
-    expect(resolveTierDefault('subagent', env)).toBe(fallback.subagent);
-    // Shape sanity: all openai-prefixed, cheap ≠ top unless the recipe list
-    // collapses to one family member.
-    for (const id of Object.values(fallback)) expect(id.startsWith('openai:')).toBe(true);
+    for (const tier of ['reasoning', 'utility', 'deep', 'subagent'] as const) {
+      expect(resolveTierDefault(tier, env)).toBe(fallback[tier]);
+    }
   });
 
   test('both keys → anthropic wins (first table entry; zero change for keyed installs)', () => {
@@ -365,20 +370,49 @@ describe('resolveTierDefault — key-aware matrix (injected env used exclusively
     const env = { ANTHROPIC_API_KEY: '', OPENAI_API_KEY: '' };
     expect(resolveTierDefault('reasoning', env)).toBe(TIER_DEFAULTS.reasoning);
     const openaiOnly = { ANTHROPIC_API_KEY: '', OPENAI_API_KEY: 'sk-test' };
+    // No discovery data in this hermetic test env → falls through to
+    // TIER_DEFAULTS, not the static openai guess (see P0 test above).
     expect(resolveTierDefault('reasoning', openaiOnly)).toBe(openaiStaticTierFallback().reasoning);
+  });
+
+  test('a model resolves via the key-aware path only when it is VERIFIABLY servable — no model resolves at all is a valid outcome the caller must fail loud on', () => {
+    // model-config.ts itself never throws (it always returns SOME string —
+    // TIER_DEFAULTS is the unconditional floor), but with only an
+    // OPENAI_API_KEY and no discovery data, the returned model is the
+    // Anthropic shape with NO Anthropic key present. Downstream
+    // (src/core/think/index.ts + src/core/verbs.ts synthesize), this
+    // resolves to `probeChatModel` returning `{ok:false, reason:'unavailable'}`,
+    // which the synthesize verb turns into a HARD `verbError('unavailable', ...)`
+    // — never a fake zero-usage success. This test pins the model-config half
+    // of that contract: the returned model must be the UNSERVABLE anthropic
+    // default (not a plausible-but-wrong OpenAI literal id), so the
+    // downstream key-presence check does its job.
+    const env = { OPENAI_API_KEY: 'sk-test' };
+    const resolved = resolveTierDefault('deep', { ...env, OPENAI_BASE_URL: 'http://localhost:8088/v1' });
+    expect(resolved).toBe(TIER_DEFAULTS.deep);
   });
 
   test('table order is the precedence contract: anthropic first, openai second', () => {
     expect(PROVIDER_TIER_DEFAULTS[0].provider).toBe('anthropic');
     expect(PROVIDER_TIER_DEFAULTS[1].provider).toBe('openai');
   });
+
+  test('unparseable OPENAI_BASE_URL warns with the rejected value', () => {
+    const badUrl = 'not a valid openai url';
+    expect(resolveTierDefault('reasoning', { OPENAI_API_KEY: 'sk-test', OPENAI_BASE_URL: badUrl }))
+      .toBe(TIER_DEFAULTS.reasoning);
+    expect(stderrCapture).toContain('OPENAI_BASE_URL');
+    expect(stderrCapture).toContain(badUrl);
+  });
 });
 
 describe('resolveModelDetailed — sources + key-aware step 7', () => {
-  test('tier default resolves key-aware with source tier_default (openai-only env)', async () => {
+  test('tier default resolves key-aware with source tier_default (openai-only env, no discovery data)', async () => {
     process.env.OPENAI_API_KEY = 'sk-test';
     try {
       const r = await resolveModelDetailed(null, { tier: 'reasoning', fallback: 'sonnet' });
+      // P0 2026-09-08: no discovery data → TIER_DEFAULTS floor, never the
+      // guessed static openai literal id (see resolveTierDefault tests).
       expect(r.model).toBe(openaiStaticTierFallback().reasoning);
       expect(r.source).toBe('tier_default');
     } finally {
@@ -422,15 +456,18 @@ describe('resolveModelDetailed — sources + key-aware step 7', () => {
     expect(noTier.model).toBe(DEFAULT_ALIASES.sonnet);
   });
 
-  test('subagent + openai-only: returns cache-capable openai without a no-caching warn', async () => {
+  test('subagent + openai-only, no discovery data: falls through to the anthropic subagent default', async () => {
     process.env.OPENAI_API_KEY = 'sk-test';
     try {
       const r = await resolveModelDetailed(null, { tier: 'subagent', fallback: 'sonnet' });
+      // P0 2026-09-08: same fall-through as the other tiers — an
+      // unverified OpenAI guess is never a subagent-loop pick either.
       expect(r.model).toBe(openaiStaticTierFallback().subagent);
       expect(stderrCapture).not.toContain('caching');
       const before = stderrCapture.length;
       await resolveModelDetailed(null, { tier: 'subagent', fallback: 'sonnet' });
-      expect(stderrCapture.length).toBe(before); // remains warning-free
+      expect(stderrCapture).not.toContain('caching');
+      expect(stderrCapture.length).toBe(before);
     } finally {
       delete process.env.OPENAI_API_KEY;
     }
@@ -486,6 +523,9 @@ describe('providerKeyReady + resolveEffectiveChatModel (shared runtime/report re
     expect(resolveEffectiveChatModel(null, {})).toEqual({
       model: TIER_DEFAULTS.reasoning, source: 'tier_default',
     });
+    // P0 2026-09-08: OPENAI_API_KEY alone, with no discovery data backing
+    // it, must NOT resolve to the guessed static openai literal — it falls
+    // through to the same anthropic-shape floor as the keyless case.
     expect(resolveEffectiveChatModel(null, { OPENAI_API_KEY: 'sk-test' })).toEqual({
       model: openaiStaticTierFallback().reasoning, source: 'tier_default',
     });

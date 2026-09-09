@@ -27,7 +27,7 @@ class StubEngine {
   async setConfig() {}
 }
 
-const PINNED = ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'GBRAIN_MODEL', 'GBRAIN_CHAT_MODEL', 'GBRAIN_HOME'] as const;
+const PINNED = ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'OPENAI_BASE_URL', 'GBRAIN_MODEL', 'GBRAIN_CHAT_MODEL', 'GBRAIN_HOME'] as const;
 let saved: Record<string, string | undefined>;
 let tmpHome: string;
 
@@ -61,8 +61,8 @@ describe('refreshGatewayForJob (worker key staleness)', () => {
   test('file-plane key added after boot reaches the gateway at the next job', async () => {
     // Boot: keyless gateway (worker started before the operator had a key).
     configureGateway({ env: {} });
-    const expected = openaiStaticTierFallback().reasoning;
-    expect(isAvailable('chat', expected)).toBe(false);
+    const staticOpenaiGuess = openaiStaticTierFallback().reasoning;
+    expect(isAvailable('chat', staticOpenaiGuess)).toBe(false);
     // Operator edits ~/.gbrain/config.json while the worker runs.
     mkdirSync(join(tmpHome, '.gbrain'), { recursive: true });
     writeFileSync(
@@ -70,10 +70,13 @@ describe('refreshGatewayForJob (worker key staleness)', () => {
       JSON.stringify({ engine: 'pglite', openai_api_key: 'sk-added-later' }),
     );
     await refreshGatewayForJob(new StubEngine() as never);
-    // The re-fold picked the key up AND key-aware re-resolution routed chat
-    // to the recipe-ranked default (no discovery cache in this hermetic env).
-    expect(isAvailable('chat', expected)).toBe(true);
-    expect(getChatModel()).toBe(expected);
+    // The re-fold picked the key up (isAvailable only checks key presence
+    // for a provider, so it stays true for ANY openai-shaped model string
+    // once the key lands — that part is unchanged). P0 2026-09-08: what
+    // changed is WHICH model the key-aware default actually resolves to.
+    // Default-host cache-cold behavior stays backward compatible.
+    expect(isAvailable('chat', staticOpenaiGuess)).toBe(true);
+    expect(getChatModel()).toBe(staticOpenaiGuess);
   });
 
   test('unreadable config: env re-fold falls back to process env, refresh never throws', async () => {
@@ -123,6 +126,17 @@ describe('init resolveChatByEnv (no-persist contract, CX2)', () => {
     // Key-aware runtime resolution replaced install-time pins — the resolved
     // options object must stay unpinned regardless of what was detected.
     expect(out.chat_model).toBeUndefined();
+  });
+
+  test('summary prints the runtime-resolved model even when it differs from the detected recipe', async () => {
+    process.env.OPENAI_API_KEY = 'sk-test';
+    process.env.OPENAI_BASE_URL = 'http://localhost:8088/v1';
+    let stderr = '';
+    const prior = console.error;
+    console.error = (...args: unknown[]) => { stderr += `${args.join(' ')}\n`; };
+    try { await resolveChatByEnv({} as never); } finally { console.error = prior; }
+    expect(stderr).toContain('anthropic:claude-sonnet-4-6');
+    expect(stderr).not.toContain('openai:gpt-5.6');
   });
 });
 

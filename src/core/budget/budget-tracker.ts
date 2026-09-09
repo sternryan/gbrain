@@ -277,7 +277,11 @@ const FREE_LOCAL_CHAT_PROVIDERS: ReadonlySet<string> = new Set([
  *     callers don't TX2 hard-fail on local inference recipes (electricity,
  *     not tokens); else unknown.
  */
-function lookupPricing(modelId: string, kind: BudgetKind): ModelPricing | null {
+function lookupPricing(
+  modelId: string,
+  kind: BudgetKind,
+  env: Record<string, string | undefined> = process.env,
+): ModelPricing | null {
   if (kind === 'embed') {
     const hit = lookupEmbeddingPrice(modelId);
     if (hit.kind === 'known') {
@@ -320,7 +324,7 @@ function lookupPricing(modelId: string, kind: BudgetKind): ModelPricing | null {
   // models with a known price (openai:*, google:*, deepseek:*) resolve under
   // --max-cost instead of TX2 no_pricing hard-failing at $0. ANTHROPIC_PRICING
   // above is only the bare-keyed Claude view.
-  const canon = canonicalLookup(modelId);
+  const canon = canonicalLookup(modelId, env);
   if (canon) return canon;
   // Local-inference chat providers cost electricity, not tokens. Checked AFTER
   // the canonical table so an explicitly-priced local entry, should one ever be
@@ -338,8 +342,13 @@ function lookupPricing(modelId: string, kind: BudgetKind): ModelPricing | null {
  * `reserve()` hard-fails with BudgetExhausted(reason:'no_pricing') and the
  * caller silently does no work.
  */
-export function isModelPriceable(modelId: string, kind: BudgetKind, overrides?: PricingOverrides): boolean {
-  return overrideFor(modelId, overrides) !== null || lookupPricing(modelId, kind) !== null;
+export function isModelPriceable(
+  modelId: string,
+  kind: BudgetKind,
+  overrides?: PricingOverrides,
+  env: Record<string, string | undefined> = process.env,
+): boolean {
+  return overrideFor(modelId, overrides) !== null || lookupPricing(modelId, kind, env) !== null;
 }
 
 function costForUsage(

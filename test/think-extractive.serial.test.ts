@@ -218,6 +218,7 @@ describe('synthesize verb — compose-failure precedence (via dispatch)', () => 
     );
     expect(isError).toBe(false);
     expect(body.synthesis_status).toBe('extractive_fallback');
+    expect(body.cost.status).toBe('failed');
     expect(body.warnings).toContain('LLM_OUTPUT_NOT_JSON');
     expect(body.pages_gathered).toBeGreaterThanOrEqual(1);
     expect(typeof body.takes_gathered).toBe('number');
@@ -255,6 +256,8 @@ describe('synthesize verb — compose-failure precedence (via dispatch)', () => 
     );
     expect(isError).toBe(false);
     expect(body.synthesis_status).toBe('extractive_fallback');
+    expect(body.cost.status).toBe('failed');
+    expect(body.cost.usd_estimate).toBeNull();
     // '503 upstream' carries no timeout/rate-limit/network shape → provider_error.
     expect(body.warnings).toContain('LLM_CALL_FAILED: provider_error');
     expect(body.warnings.some((w: string) => w.includes('simulated'))).toBe(false);

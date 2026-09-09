@@ -307,6 +307,9 @@ const synthesize: Operation = {
         ? (usage.input_tokens * pricing.input + usage.output_tokens * pricing.output) / 1_000_000
         : null;
     const cost = {
+      status: result.synthesis_status === undefined
+        ? 'unknown'
+        : result.synthesis_status === 'ok' ? 'success' : 'failed',
       model: result.modelUsed,
       input_tokens: usage?.input_tokens ?? null,
       output_tokens: usage?.output_tokens ?? null,
@@ -598,9 +601,10 @@ export const RESPONSE_SCHEMAS: Record<VerbName, Record<string, unknown>> = {
       gaps: { type: 'array', items: { type: 'string' } },
       cost: {
         type: 'object',
-        required: ['model', 'input_tokens', 'output_tokens', 'usd_estimate'],
+        required: ['status', 'model', 'input_tokens', 'output_tokens', 'usd_estimate'],
         description: 'Best-effort aggregate (retries/multi-call flows sum; cache hits may undercount). Honest signal, not an invoice.',
         properties: {
+          status: { type: 'string', enum: ['success', 'failed', 'unknown'] },
           model: { type: 'string' },
           input_tokens: { type: ['integer', 'null'] },
           output_tokens: { type: ['integer', 'null'] },

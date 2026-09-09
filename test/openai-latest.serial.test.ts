@@ -23,9 +23,9 @@ import {
   refreshLatestOpenAIModels,
   _resetOpenAILatestForTests,
 } from '../src/core/ai/openai-latest.ts';
-import { resolveTierDefault, openaiStaticTierFallback } from '../src/core/model-config.ts';
+import { resolveTierDefault, openaiStaticTierFallback, TIER_DEFAULTS } from '../src/core/model-config.ts';
 
-const PINNED = ['GBRAIN_HOME', 'GBRAIN_MODEL_DISCOVERY', 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY'] as const;
+const PINNED = ['GBRAIN_HOME', 'GBRAIN_MODEL_DISCOVERY', 'OPENAI_API_KEY', 'OPENAI_BASE_URL', 'ANTHROPIC_API_KEY'] as const;
 let saved: Record<string, string | undefined>;
 let tmpHome: string;
 
@@ -169,10 +169,41 @@ describe('refresh + cache + resolution overlay', () => {
       .toBe('anthropic:claude-sonnet-4-6');
   });
 
-  test('no cache → static recipe-ranked fallback', () => {
+  test('default host + cold cache preserves the static OpenAI tier defaults', () => {
     expect(latestOpenAITiers('reasoning')).toBeNull();
     expect(resolveTierDefault('reasoning', { OPENAI_API_KEY: 'sk-test' }))
       .toBe(openaiStaticTierFallback().reasoning);
+  });
+
+  test('non-default gateway negative discovery picks advertised local-heavy for deep and reasoning', async () => {
+    const env = { OPENAI_API_KEY: 'sk-test', OPENAI_BASE_URL: 'http://127.0.0.1:8088/v1' };
+    await refreshLatestOpenAIModels({ env, baseUrl: env.OPENAI_BASE_URL, fetchImpl: fetchReturning([
+      'local-heavy', 'local-fast', 'text-embedding-3-large',
+    ]), force: true });
+    expect(resolveTierDefault('reasoning', env)).toBe('openai:local-heavy');
+    expect(resolveTierDefault('deep', env)).toBe('openai:local-heavy');
+  });
+
+  test('official host negative discovery never treats image or legacy ids as chat defaults', async () => {
+    const env = { OPENAI_API_KEY: 'sk-test' };
+    await refreshLatestOpenAIModels({ env, fetchImpl: fetchReturning([
+      'dall-e-3', 'gpt-image-1', 'babbage-002', 'omni-moderation-latest', 'gpt-4o',
+    ]), force: true });
+    expect(resolveTierDefault('utility', env)).toBe(openaiStaticTierFallback().utility);
+    expect(resolveTierDefault('reasoning', env)).toBe(openaiStaticTierFallback().reasoning);
+    expect(resolveTierDefault('deep', env)).toBe(openaiStaticTierFallback().deep);
+  });
+
+  test('gateway negative discovery routes utility to local-fast and reasoning/deep to local-heavy', async () => {
+    const env = { OPENAI_API_KEY: 'sk-test', OPENAI_BASE_URL: 'http://127.0.0.1:8088/v1' };
+    await refreshLatestOpenAIModels({
+      env, baseUrl: env.OPENAI_BASE_URL,
+      fetchImpl: fetchReturning(['dall-e-3', 'local-heavy', 'local-fast', 'text-embedding-3-large']),
+      force: true,
+    });
+    expect(resolveTierDefault('utility', env)).toBe('openai:local-fast');
+    expect(resolveTierDefault('reasoning', env)).toBe('openai:local-heavy');
+    expect(resolveTierDefault('deep', env)).toBe('openai:local-heavy');
   });
 
   test('TTL throttle: a fresh cache suppresses refetch; force bypasses', async () => {
@@ -354,9 +385,88 @@ describe('coverage-gap additions (ship review)', () => {
     expect(calls).toBe(1);
   });
 
-  test('empty/malformed bodies never write the cache', async () => {
-    await refreshLatestOpenAIModels({ env: { OPENAI_API_KEY: 'k' }, fetchImpl: fetchReturning([]), force: true });
-    expect(latestOpenAITiers()).toBeNull();
+  test('empty model lists stamp the attempt without replacing prior positive tiers', async () => {
+    const env = { OPENAI_API_KEY: 'k' };
+    await refreshLatestOpenAIModels({ env, fetchImpl: fetchReturning(['gpt-5.6']), force: true });
+    expect(latestOpenAITiers('deep')).toBe('openai:gpt-5.6');
+    await refreshLatestOpenAIModels({ env, fetchImpl: fetchReturning([]), force: true });
+    expect(latestOpenAITiers('deep')).toBe('openai:gpt-5.6');
+  });
+
+  test('negative discovery expiry fails loud when the configured heavy lane was renamed', async () => {
+    const env = { OPENAI_API_KEY: 'k', OPENAI_BASE_URL: 'http://127.0.0.1:8088/v1' };
+    await refreshLatestOpenAIModels({ env, baseUrl: env.OPENAI_BASE_URL, fetchImpl: fetchReturning([
+      'local-heavy', 'local-fast',
+    ]), force: true });
+    expect(resolveTierDefault('deep', env)).toBe('openai:local-heavy');
+
+    const path = join(tmpHome, '.gbrain', 'model-cache.json');
+    const cached = JSON.parse(readFileSync(path, 'utf8'));
+    const elevenMinutesAgo = new Date(Date.now() - 11 * 60 * 1000).toISOString();
+    cached.openai.fetched_at = elevenMinutesAgo;
+    cached.last_attempt_at = elevenMinutesAgo;
+    writeFileSync(path, JSON.stringify(cached, null, 2));
+    _resetOpenAILatestForTests();
+
+    let calls = 0;
+    const renamed = (async () => {
+      calls++;
+      return new Response(JSON.stringify({ data: [{ id: 'local-fast' }, { id: 'anvil-heavy-v2' }] }), { status: 200 });
+    }) as unknown as typeof fetch;
+    await refreshLatestOpenAIModels({ env, baseUrl: env.OPENAI_BASE_URL, fetchImpl: renamed });
+    expect(calls).toBe(1);
+    expect(resolveTierDefault('deep', env)).toBe(TIER_DEFAULTS.deep);
+  });
+
+  test('gateway emits the ADVERTISED casing for a configured custom heavy lane and never guesses a candidate', async () => {
+    const baseEnv = { OPENAI_API_KEY: 'k', OPENAI_BASE_URL: 'http://127.0.0.1:8088/v1' };
+    await refreshLatestOpenAIModels({
+      env: baseEnv,
+      baseUrl: baseEnv.OPENAI_BASE_URL,
+      fetchImpl: fetchReturning(['HETZNER-QWEN38', 'hammer-9b', 'embeddings']),
+      force: true,
+    });
+    expect(resolveTierDefault('deep', {
+      ...baseEnv,
+      GBRAIN_GATEWAY_LANE_HEAVY: 'hetzner-qwen38',
+    })).toBe('openai:HETZNER-QWEN38'); // N22: the wire id is the gateway's own spelling
+    expect(resolveTierDefault('deep', baseEnv)).toBe(TIER_DEFAULTS.deep);
+    expect(resolveTierDefault('utility', baseEnv)).toBe(TIER_DEFAULTS.utility);
+  });
+
+  test('gateway rejects a positive cache tier absent from observed model ids', async () => {
+    const env = { OPENAI_API_KEY: 'k', OPENAI_BASE_URL: 'http://127.0.0.1:8088/v1' };
+    await refreshLatestOpenAIModels({
+      env,
+      baseUrl: env.OPENAI_BASE_URL,
+      fetchImpl: fetchReturning(['gpt-5.6', 'gpt-5.6-terra', 'gpt-5.6-luna']),
+      force: true,
+    });
+    const path = join(tmpHome, '.gbrain', 'model-cache.json');
+    const cached = JSON.parse(readFileSync(path, 'utf8'));
+    cached.openai.observed_model_ids = ['gpt-5.6-luna'];
+    writeFileSync(path, JSON.stringify(cached, null, 2));
+    _resetOpenAILatestForTests();
+    expect(resolveTierDefault('deep', env)).toBe(TIER_DEFAULTS.deep);
+  });
+
+  test('gateway fails closed for a legacy positive cache without observed model ids', async () => {
+    const env = { OPENAI_API_KEY: 'k', OPENAI_BASE_URL: 'http://127.0.0.1:8088/v1' };
+    await refreshLatestOpenAIModels({
+      env,
+      baseUrl: env.OPENAI_BASE_URL,
+      fetchImpl: fetchReturning(['gpt-5.6', 'gpt-5.6-terra', 'gpt-5.6-luna']),
+      force: true,
+    });
+    const path = join(tmpHome, '.gbrain', 'model-cache.json');
+    const cached = JSON.parse(readFileSync(path, 'utf8'));
+    delete cached.openai.observed_model_ids;
+    writeFileSync(path, JSON.stringify(cached, null, 2));
+    _resetOpenAILatestForTests();
+    expect(resolveTierDefault('deep', env)).toBe(TIER_DEFAULTS.deep);
+  });
+
+  test('malformed bodies never write positive tiers', async () => {
     const noData = (async () => new Response('{}', { status: 200 })) as unknown as typeof fetch;
     await refreshLatestOpenAIModels({ env: { OPENAI_API_KEY: 'k' }, fetchImpl: noData, force: true });
     expect(latestOpenAITiers()).toBeNull();

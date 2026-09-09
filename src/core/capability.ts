@@ -54,6 +54,7 @@ export interface CapabilityReport {
   search: 'semantic' | 'keyword-only';
   /** 'keyless' when NO paid touchpoint is configured — the CX-P0.5 posture. */
   mode: 'keyed' | 'keyless';
+  reason?: string;
 }
 
 export interface DetectCapabilitiesOpts {
@@ -126,11 +127,16 @@ export function detectCapabilities(opts: DetectCapabilitiesOpts = {}): Capabilit
     env,
   );
 
+  const anyKey = [...RECIPES.values()].some((recipe) =>
+    (recipe.auth_env?.required ?? []).some((key) => !!env[key]));
   return {
     embeddings,
     extraction,
     search: embeddings.available ? 'semantic' : 'keyword-only',
-    mode: embeddings.available || extraction.available ? 'keyed' : 'keyless',
+    mode: embeddings.available || extraction.available || anyKey ? 'keyed' : 'keyless',
+    ...(anyKey && !extraction.available
+      ? { reason: 'provider key configured, but the resolved chat model is not servable' }
+      : {}),
   };
 }
 
@@ -142,6 +148,7 @@ export function detectCapabilities(opts: DetectCapabilitiesOpts = {}): Capabilit
 export function renderCapabilityReport(caps: CapabilityReport): string {
   const lines: string[] = [];
   lines.push(`gbrain capabilities: ${caps.mode} mode`);
+  if (caps.reason) lines.push(`  status: ${caps.reason}`);
   lines.push(
     caps.embeddings.available
       ? `  embeddings: available via ${caps.embeddings.provider} — semantic (hybrid vector + keyword) search`

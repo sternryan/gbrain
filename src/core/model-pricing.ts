@@ -30,11 +30,27 @@
  *
  * Scope: PAID CLOUD chat models only. Free/local providers (llama-server,
  * zero-cost rerankers) are intentionally absent — callers treat those as
- * zero-cost elsewhere. Embeddings live in embedding-pricing.ts (different unit:
- * per-MTok, char-based).
+ * zero-cost elsewhere. The two configured gateway-local OpenAI-compatible
+ * lanes are recognized dynamically by canonicalLookup only for a verified
+ * non-default OPENAI_BASE_URL; they are not unconditional canonical rows.
+ * Embeddings live in embedding-pricing.ts (different unit: per-MTok,
+ * char-based).
  */
 
 import { splitProviderModelId } from './model-id.ts';
+
+export const DEFAULT_GATEWAY_LANE_UTILITY = 'local-fast';
+export const DEFAULT_GATEWAY_LANE_HEAVY = 'local-heavy';
+
+/** Resolve the operator-configured OpenAI-compatible gateway lane names. */
+export function resolvedGatewayLaneNames(
+  env: Record<string, string | undefined> = process.env,
+): { utility: string; heavy: string } {
+  return {
+    utility: env.GBRAIN_GATEWAY_LANE_UTILITY?.trim() || DEFAULT_GATEWAY_LANE_UTILITY,
+    heavy: env.GBRAIN_GATEWAY_LANE_HEAVY?.trim() || DEFAULT_GATEWAY_LANE_HEAVY,
+  };
+}
 
 export interface ModelPricing {
   /** USD per 1M input tokens. */
@@ -195,6 +211,7 @@ export const CANONICAL_PRICING: Record<string, ModelPricing> = {
  */
 export function canonicalLookup(
   modelId: string | null | undefined,
+  env: Record<string, string | undefined> = process.env,
 ): ModelPricing | undefined {
   if (!modelId) return undefined;
   // 1. Exact key — colon form, already-canonical ids, and slash-bearing model
@@ -214,7 +231,35 @@ export function canonicalLookup(
   //    Safe only while no two canonical keys collide case-insensitively —
   //    pinned by test/model-pricing.test.ts.
   const folded = canonicalFoldedView();
-  return folded[modelId.toLowerCase()] ?? folded[key.toLowerCase()];
+  const canonical = folded[modelId.toLowerCase()] ?? folded[key.toLowerCase()];
+  if (canonical) return canonical;
+  // 4. Configured gateway lanes (N15/N21): a lane id the canonical table does
+  //    NOT know is free only behind a verified non-official OPENAI_BASE_URL.
+  //    The table is consulted first on purpose — a lane named after a real
+  //    priced model (GBRAIN_GATEWAY_LANE_HEAVY=gpt-5.6 in front of a
+  //    pass-through proxy) must keep its real price, never $0.
+  return configuredGatewayLanePricing(modelId, env);
+}
+
+function configuredGatewayLanePricing(
+  modelId: string,
+  env: Record<string, string | undefined>,
+): ModelPricing | undefined {
+  const { utility, heavy } = resolvedGatewayLaneNames(env);
+  const foldedModelId = modelId.toLowerCase();
+  const isConfiguredGatewayLane = [utility, heavy]
+    .some((lane) => foldedModelId === `openai:${lane}`.toLowerCase());
+  if (!isConfiguredGatewayLane) return undefined;
+  const rawBaseUrl = env.OPENAI_BASE_URL?.trim();
+  if (!rawBaseUrl) return undefined;
+  try {
+    if (new URL(rawBaseUrl).hostname.toLowerCase() !== 'api.openai.com') {
+      return { input: 0, output: 0 };
+    }
+  } catch {
+    // A malformed URL is not verified local-gateway evidence.
+  }
+  return undefined;
 }
 
 let _canonicalFoldedView: Record<string, ModelPricing> | null = null;

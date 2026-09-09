@@ -80,9 +80,12 @@ describe('detectCapabilities — matrix', () => {
 
   test('unknown provider in model string → no throw; extraction falls back key-aware', () => {
     // Availability-aware fallback: an unknown chat pin is unservable, so the
-    // effective-model resolution falls through to the key-aware tier default —
-    // with an OpenAI key present, extraction is honestly AVAILABLE via openai
-    // (an openai-only install with a garbage pin must still extract).
+    // effective-model resolution falls through to the key-aware tier default.
+    // P0 2026-09-08: with an OpenAI key present but NO discovery data backing
+    // it, that key-aware default is the anthropic-shape TIER_DEFAULTS floor
+    // (never a guessed literal openai id nothing confirmed is servable) — so
+    // in this hermetic env (no ANTHROPIC_API_KEY either) extraction is
+    // honestly unavailable, not falsely "available via openai".
     const caps = detectCapabilities({
       config: cfg({
         embedding_model: 'not-a-provider:some-model',
@@ -108,9 +111,29 @@ describe('detectCapabilities — matrix', () => {
     expect(caps.mode).toBe('keyless');
   });
 
-  test('openai-key-only, no config → extraction available via openai (key-aware default)', () => {
+  test('openai-key-only, default host, cold cache → keyed and extraction available', () => {
+    // Pre-fix, mere OPENAI_API_KEY presence made this report "available via
+    // openai" even when nothing confirmed the auto-selected literal id
+    // (e.g. "openai:gpt-5.6") is reachable through whatever OPENAI_BASE_URL
+    // is configured — the exact shape of the hearth P0 (OPENAI_API_KEY set,
+    // OPENAI_BASE_URL pointed at a local litellm gateway that never serves
+    // real OpenAI ids). With no discovery cache backing it, the resolver
+    // falls through to the anthropic-shape tier default, which this
+    // hermetic env has no key for either — so extraction correctly reports
+    // unavailable instead of a false "available via openai".
     const caps = detectCapabilities({ config: null, env: { OPENAI_API_KEY: 'sk-test' } });
     expect(caps.extraction).toEqual({ available: true, provider: 'openai' });
+    expect(caps.mode).toBe('keyed');
+  });
+
+  test('non-default gateway with a key but no servable discovery is keyed with a truthful reason', () => {
+    const caps = detectCapabilities({
+      config: null,
+      env: { OPENAI_API_KEY: 'sk-test', OPENAI_BASE_URL: 'http://localhost:8088/v1' },
+    });
+    expect(caps.extraction.available).toBe(false);
+    expect(caps.mode).toBe('keyed');
+    expect(caps.reason).toContain('not servable');
   });
 
   test('voyage key + voyage embedding pin → embeddings yes, extraction no, mode keyed', () => {

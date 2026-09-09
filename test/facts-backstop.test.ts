@@ -11,7 +11,7 @@
 
 import { describe, test, expect, beforeAll, afterAll, afterEach } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
-import { runFactsBackstop } from '../src/core/facts/backstop.ts';
+import { classifyUnavailable, runFactsBackstop } from '../src/core/facts/backstop.ts';
 import type { FactsBackstopCtx } from '../src/core/facts/backstop.ts';
 import {
   __setChatTransportForTests,
@@ -98,6 +98,13 @@ async function factsForIds(ids: number[]): Promise<Array<{ fact: string }>> {
 }
 
 describe('runFactsBackstop — eligibility + kill-switch gates', () => {
+  test('key present but resolver outcome unservable is calm and not retried per page', async () => {
+    const classification = await classifyUnavailable('anthropic:claude-sonnet-4-6', {
+      config: null,
+      env: { OPENAI_API_KEY: 'sk-gateway', OPENAI_BASE_URL: 'http://localhost:8088/v1' },
+    });
+    expect(classification).toBe('keyless');
+  });
   test('skips with extraction_disabled when kill-switch off', async () => {
     await engine.setConfig('facts.extraction_enabled', 'false');
     const r = await runFactsBackstop(meetingPage(), makeCtx({ mode: 'inline' }));
