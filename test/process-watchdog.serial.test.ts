@@ -12,6 +12,8 @@ import { describe, test, expect } from 'bun:test';
 import { join } from 'node:path';
 
 const HARNESS = join(import.meta.dir, 'fixtures', 'watchdog-harness.ts');
+const PINNED_BUN_VERSION = '1.3.13';
+const describePinned = Bun.version === PINNED_BUN_VERSION ? describe : describe.skip;
 
 async function runHarness(
   mode: string,
@@ -37,7 +39,7 @@ async function runHarness(
   return { exitCode: proc.exitCode, signalled, elapsedMs, stdout, stderr, killedByTest };
 }
 
-describe('process-watchdog integration (Bun-pinned)', () => {
+describePinned('process-watchdog integration (Bun-pinned)', () => {
   test('starved process IS killed by the watchdog around deadline+grace', async () => {
     // deadline 300 + grace 200 = ~500ms expected death. Hard cap 4s: if the
     // watchdog failed, the test's own SIGKILL fires and the assertion catches it.
@@ -67,7 +69,7 @@ describe('process-watchdog integration (Bun-pinned)', () => {
   }, 15000);
 });
 
-describe('loop-stall watchdog integration (Bun-pinned, #4281)', () => {
+describePinned('loop-stall watchdog integration (Bun-pinned, #4281)', () => {
   test('starved loop with a SIGTERM listener is SIGTERMed then SIGKILLed around stall+grace', async () => {
     // stall 300 + grace 250 = ~550ms expected death (plus worker boot). The
     // harness registers a SIGTERM listener, so only the SIGKILL escalation can

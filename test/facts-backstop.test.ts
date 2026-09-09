@@ -25,6 +25,14 @@ import { __resetFactsQueueForTests } from '../src/core/facts/queue.ts';
 let engine: PGLiteEngine;
 
 beforeAll(async () => {
+  // This file's embedding fixtures are 1536d. Pin the gateway before schema
+  // creation instead of relying on bunfig preload ordering across Bun releases.
+  resetGateway();
+  configureGateway({
+    embedding_model: 'openai:text-embedding-3-large',
+    embedding_dimensions: 1536,
+    env: { OPENAI_API_KEY: 'test' },
+  });
   engine = new PGLiteEngine();
   await engine.connect({});
   await engine.initSchema();
@@ -32,6 +40,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await engine.disconnect();
+  resetGateway();
 });
 
 afterEach(() => {

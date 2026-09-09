@@ -21,6 +21,8 @@ import { describe, test, expect } from 'bun:test';
 import { join } from 'node:path';
 
 const HARNESS = join(import.meta.dir, 'fixtures', 'pglite-disconnect-watchdog-harness.ts');
+const PINNED_BUN_VERSION = '1.3.13';
+const describePinned = Bun.version === PINNED_BUN_VERSION ? describe : describe.skip;
 
 /** Per-mode env; the close-timeout env also shapes the lethal-knob floor. */
 const CLOSE_TIMEOUT_MS = 1_000;
@@ -107,7 +109,7 @@ function expectedFloor(stdout: string): number {
   return Math.max(5000, sinks * 2000 + CLOSE_TIMEOUT_MS + 2000);
 }
 
-describe('pglite disconnect watchdog vs a wedged event loop (#4284, Bun-pinned)', () => {
+describePinned('pglite disconnect watchdog vs a wedged event loop (#4284, Bun-pinned)', () => {
   test('wedge-watchdog: the out-of-band watchdog SIGKILLs a loop-starved close at deadline+grace', async () => {
     const r = await runFixture('wedge-watchdog', {
       GBRAIN_PGLITE_CLOSE_TIMEOUT_MS: String(CLOSE_TIMEOUT_MS),
