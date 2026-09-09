@@ -14,8 +14,12 @@ import {
   resetGateway,
   rerank,
   __setRerankTransportForTests,
+  __setSunsetClockForTests,
   _resetSunsetWarningsForTest,
 } from '../../src/core/ai/gateway.ts';
+
+const BEFORE_RERANKER_SUNSET = new Date('2026-09-03T23:59:59Z');
+const AFTER_RERANKER_SUNSET = new Date('2026-09-05T00:00:00Z');
 
 function mockResp(json: unknown, status = 200): Response {
   return new Response(JSON.stringify(json), {
@@ -47,32 +51,47 @@ beforeEach(() => {
 afterEach(() => {
   process.stderr.write = origWrite;
   __setRerankTransportForTests(null);
+  __setSunsetClockForTests(null);
   _resetSunsetWarningsForTest();
   resetGateway();
 });
 
 describe('sunset warn-on-use (v0.46.3)', () => {
-  test('first ZE rerank prints the deprecation warning with the replacement command', async () => {
+  test('after sunset, ZE rerank is skipped with one clear replacement line', async () => {
+    __setSunsetClockForTests(() => AFTER_RERANKER_SUNSET);
+    await expect(rerank({ query: 'q', documents: ['a'] }))
+      .rejects.toMatchObject({ reason: 'sunset_short_circuit' });
+    const all = stderrChunks.join('');
+    expect(all).toContain('rerank calls are skipped');
+    expect(all).toContain('2026-09-04');
+    expect(all).toContain('search.reranker.model voyage:rerank-2.5');
+    expect(all).not.toContain('DEPRECATED');
+  });
+
+  test('post-sunset skip line fires once per process, not once per call', async () => {
+    __setSunsetClockForTests(() => AFTER_RERANKER_SUNSET);
+    await expect(rerank({ query: 'q', documents: ['a'] })).rejects.toThrow();
+    await expect(rerank({ query: 'q2', documents: ['b'] })).rejects.toThrow();
+    const hits = stderrChunks.join('').split('rerank calls are skipped').length - 1;
+    expect(hits).toBe(1);
+  });
+
+  test('reset seam re-arms the post-sunset skip line', async () => {
+    __setSunsetClockForTests(() => AFTER_RERANKER_SUNSET);
+    await expect(rerank({ query: 'q', documents: ['a'] })).rejects.toThrow();
+    _resetSunsetWarningsForTest();
+    await expect(rerank({ query: 'q2', documents: ['b'] })).rejects.toThrow();
+    const hits = stderrChunks.join('').split('rerank calls are skipped').length - 1;
+    expect(hits).toBe(2);
+  });
+
+  test('before sunset, first ZE rerank prints the deprecation warning', async () => {
+    __setSunsetClockForTests(() => BEFORE_RERANKER_SUNSET);
     await rerank({ query: 'q', documents: ['a'] });
     const all = stderrChunks.join('');
     expect(all).toContain('DEPRECATED');
     expect(all).toContain('2026-09-04');
     expect(all).toContain('search.reranker.model voyage:rerank-2.5');
-  });
-
-  test('fires once per process, not once per call', async () => {
-    await rerank({ query: 'q', documents: ['a'] });
-    await rerank({ query: 'q2', documents: ['b'] });
-    const hits = stderrChunks.join('').split('DEPRECATED').length - 1;
-    expect(hits).toBe(1);
-  });
-
-  test('reset seam re-arms the warning', async () => {
-    await rerank({ query: 'q', documents: ['a'] });
-    _resetSunsetWarningsForTest();
-    await rerank({ query: 'q2', documents: ['b'] });
-    const hits = stderrChunks.join('').split('DEPRECATED').length - 1;
-    expect(hits).toBe(2);
   });
 
   test('a non-sunset provider warns nothing', async () => {

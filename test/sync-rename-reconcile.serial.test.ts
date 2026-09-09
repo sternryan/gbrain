@@ -2500,7 +2500,19 @@ describe('#3583 review: GATE25 — the upgrade path for someone already wedged b
 describe('rename destination import: an errored skip must not checkpoint the rename as done', () => {
   test('a frontmatter slug-authority rejection at the destination is retried, never falsely checkpointed', async () => {
     const { performSync } = await import('../src/commands/sync.ts');
-    const repo = mkRepo({ 'people/alpha.md': personMd('Alpha', 'Alpha is a person.') });
+    // A long, multi-sentence body (not just "Alpha is a person.") so the
+    // single injected `slug:` line stays a small fraction of the diff.
+    // git's -M rename-similarity SCORE is not a portable constant across git
+    // versions — same byte diff, git 2.43 (Linux/anvil) scored this pair at
+    // 45% (below the 50% default threshold, so it fell through to a plain
+    // delete+add, silently skipping the whole rename code path under test)
+    // while git 2.50 (macOS) scored the identical diff at 68%. A short body
+    // sits right on that knife-edge; padding it out here pushes the score to
+    // ~79-91% on both, comfortably clear of the threshold on either git.
+    const body = 'Alpha is a person. Alpha works on the flight recorder project. ' +
+      'Alpha enjoys long-form technical writing and careful root-cause analysis ' +
+      'of tricky bugs. Alpha has been debugging rename-detection edge cases.';
+    const repo = mkRepo({ 'people/alpha.md': personMd('Alpha', body) });
     await performSync(engine, { repoPath: repo, ...SYNC_OPTS });
     expect(await engine.getPage('people/alpha')).not.toBeNull();
 
@@ -2515,7 +2527,7 @@ describe('rename destination import: an errored skip must not checkpoint the ren
     execSync('git mv people/alpha.md people/beta.md', { cwd: repo, stdio: 'pipe' });
     writeFileSync(join(repo, 'people/beta.md'), [
       '---', 'type: person', 'title: Alpha', 'slug: totally-different', '---',
-      '', 'Alpha is a person.',
+      '', body,
     ].join('\n'));
     execSync('git add -A && git commit -m "rename alpha to beta, corrupted frontmatter"', {
       cwd: repo, stdio: 'pipe',
@@ -2529,7 +2541,7 @@ describe('rename destination import: an errored skip must not checkpoint the ren
     // rejected file): compiled_truth still reads the pre-rename body.
     const afterFirst = await engine.getPage('people/beta');
     expect(afterFirst).not.toBeNull();
-    expect(afterFirst?.compiled_truth).toBe('Alpha is a person.');
+    expect(afterFirst?.compiled_truth).toBe(body);
 
     // Discriminating assertion: without importErrored gating the checkpoint,
     // run 1 falsely marks `to` as done despite the recorded failure, so this
@@ -2539,14 +2551,15 @@ describe('rename destination import: an errored skip must not checkpoint the ren
     // is never falsely marked, so compiled_truth still has not moved.
     const second = await performSync(engine, { repoPath: repo, ...SYNC_OPTS });
     expect(second.status).toBe('blocked_by_failures');
-    expect((await engine.getPage('people/beta'))?.compiled_truth).toBe('Alpha is a person.');
+    expect((await engine.getPage('people/beta'))?.compiled_truth).toBe(body);
 
     // Fixing the content and re-syncing must actually materialize the fixed
     // content — proving the target was never falsely banked as complete.
-    writeFileSync(join(repo, 'people/beta.md'), personMd('Alpha', 'Alpha is a person, fixed.'));
+    const fixedBody = `${body} Fixed.`;
+    writeFileSync(join(repo, 'people/beta.md'), personMd('Alpha', fixedBody));
     execSync('git add -A && git commit -m "fix beta frontmatter"', { cwd: repo, stdio: 'pipe' });
     const third = await performSync(engine, { repoPath: repo, ...SYNC_OPTS });
     expect(third.status).toBe('synced');
-    expect((await engine.getPage('people/beta'))?.compiled_truth).toBe('Alpha is a person, fixed.');
+    expect((await engine.getPage('people/beta'))?.compiled_truth).toBe(fixedBody);
   });
 });
